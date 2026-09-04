@@ -24,6 +24,18 @@ import java.util.UUID
 
 enum class QueueEntryState { PENDING, IN_FLIGHT, ACKED, FAILED_PERMANENT }
 
+/**
+ * Which ingest endpoint an entry ships to. "hr" is the original family (HR observations + optional
+ * raw journal, schema "2"); the others are the single-family schema-"1" endpoints. Defaulted so
+ * queue files written before the families existed decode as HR unchanged.
+ */
+enum class QueueFamily {
+    @SerialName("hr") HR,
+    @SerialName("daily") DAILY,
+    @SerialName("sleep") SLEEP,
+    @SerialName("rr") RR,
+}
+
 @Serializable
 data class QueueEntry(
     /** Generated once at enqueue; never regenerated on retry. Server idempotency key. */
@@ -32,11 +44,15 @@ data class QueueEntry(
     @SerialName("attempt_count") val attemptCount: Int = 0,
     @SerialName("next_attempt_at_ms") val nextAttemptAtMs: Long = 0,
     @SerialName("state") val state: QueueEntryState = QueueEntryState.PENDING,
-    /** Inclusive ts window (unix seconds) of observations this batch covers. */
+    @SerialName("family") val family: QueueFamily = QueueFamily.HR,
+    /** Inclusive ts window (unix seconds) of observations this batch covers (HR/sleep/rr). */
     @SerialName("obs_from_ts") val obsFromTsInclusive: Long,
     @SerialName("obs_to_ts") val obsToTsInclusive: Long,
     /** Journal segments claimed by this batch; pruned only on raw_ack. */
     @SerialName("segments") val segments: List<String> = emptyList(),
+    /** Inclusive day window (yyyy-MM-dd) when [family] is DAILY; null otherwise. */
+    @SerialName("day_from") val dayFromInclusive: String? = null,
+    @SerialName("day_to") val dayToInclusive: String? = null,
     @SerialName("acked_at_ms") val ackedAtMs: Long? = null,
 )
 
@@ -53,9 +69,37 @@ class FileSyncQueue(private val dir: File) {
         val entry = QueueEntry(
             batchId = UUID.randomUUID().toString(),
             createdAtMs = nowMs,
+            family = QueueFamily.HR,
             obsFromTsInclusive = obsFromTsInclusive,
             obsToTsInclusive = obsToTsInclusive,
             segments = segments,
+        )
+        write(entry)
+        return entry
+    }
+
+    /**
+     * Enqueue a single-family batch (daily/sleep/rr). The ts window carries sleep/rr bounds
+     * (INCLUSIVE lower bound — boundary re-read, server dedupe); the day window carries daily's.
+     */
+    @Synchronized
+    fun enqueueFamily(
+        family: QueueFamily,
+        obsFromTsInclusive: Long,
+        obsToTsInclusive: Long,
+        dayFromInclusive: String?,
+        dayToInclusive: String?,
+        nowMs: Long,
+    ): QueueEntry {
+        require(family != QueueFamily.HR) { "use enqueue() for the HR family" }
+        val entry = QueueEntry(
+            batchId = UUID.randomUUID().toString(),
+            createdAtMs = nowMs,
+            family = family,
+            obsFromTsInclusive = obsFromTsInclusive,
+            obsToTsInclusive = obsToTsInclusive,
+            dayFromInclusive = dayFromInclusive,
+            dayToInclusive = dayToInclusive,
         )
         write(entry)
         return entry
