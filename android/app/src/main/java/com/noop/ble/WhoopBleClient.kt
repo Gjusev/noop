@@ -54,6 +54,9 @@ import com.noop.protocol.Framing
 import com.noop.protocol.HapticClock
 import com.noop.protocol.Reassembler
 import com.noop.protocol.Whoop5Variant
+// SOMATRIQ(fork): pre-decoder raw-frame tap — the only sync symbol in this file, and a pure
+// interface (no networking). No-op unless SomatriqSyncBridge installed a journal at app start.
+import com.noop.sync.capture.RawCapturePoint
 import com.noop.protocol.RebootProbeVariant
 import com.noop.protocol.Streams
 import com.noop.protocol.StandardHrContact
@@ -6812,6 +6815,10 @@ class WhoopBleClient(
                   // the whole app — the exact chain the redactPii bug escaped through. Wrap the whole
                   // body so a bad frame drops ONE frame and the link stays up. (log() is itself total.)
                   try {
+                    // SOMATRIQ(fork): journal the complete frame BEFORE any decode — the raw-capture
+                    // seam. Capture is pure local disk, never throws into this loop, and is a no-op
+                    // when the sync module is absent or unpaired.
+                    RawCapturePoint.capture(frame)
                     // Compute the offload-frame flag ONCE — it feeds both the R22 telemetry note and
                     // handleFrame's replayedOffload gate, so evaluating it twice bounds-checked + indexed
                     // every offloaded frame for nothing. (The Swift 5/MG inbound loop already hoists this.)
