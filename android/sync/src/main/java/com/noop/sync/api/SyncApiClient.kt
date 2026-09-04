@@ -116,6 +116,10 @@ class SyncApiClient(
                 resp.code == 401 || resp.code == 403 -> SyncCallResult.CredentialsInvalid(code, message)
                 isCredentialsCode(code) -> SyncCallResult.CredentialsInvalid(code, message)
                 isPermanentCode(code) -> SyncCallResult.Permanent(code, message)
+                // Unknown 4xx/5xx (incl. HTTP_404) stay Retryable BY DESIGN: a
+                // reverse proxy emits bare 404/502/503 while backends restart
+                // (verified against a real Dokploy outage, 2026-09-04). Only an
+                // explicit contract error_code marks Permanent/Credentials.
                 resp.code >= 500 -> SyncCallResult.Retryable(code, message)
                 else -> SyncCallResult.Retryable(code, message)
             }
