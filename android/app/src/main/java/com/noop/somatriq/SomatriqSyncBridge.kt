@@ -4,8 +4,11 @@ import android.util.Log
 import com.noop.BuildConfig
 import com.noop.NoopApplication
 import com.noop.data.WhoopDatabase
+import com.noop.sync.DailyMetricObservation
 import com.noop.sync.HrObservation
 import com.noop.sync.ObservationSource
+import com.noop.sync.RrIntervalObservation
+import com.noop.sync.SleepSessionObservation
 import com.noop.sync.SyncContract
 import com.noop.sync.SyncDiagnostics
 import com.noop.sync.SyncManager
@@ -120,9 +123,10 @@ object SomatriqSyncBridge {
  * by NOOP — nothing ever writes it to 1 — so the sync watermark lives in the sync module's own
  * state file; see docs/somatriq/SYNC-NOTES.md.)
  *
- * Only `hrSample` ships in this milestone — measured strap HR via [com.noop.data.WhoopDao.rawHrSamples],
- * NOT the v26 PPG-derived union (Somatriq wants sensor observations; derived estimates would
- * double-represent the same second).
+ * Streams shipped: measured strap HR ([com.noop.data.WhoopDao.rawHrSamples], NOT the v26 PPG-derived
+ * union — Somatriq wants sensor observations; derived estimates would double-represent the same
+ * second), dailyMetric, sleepSession, and rrInterval — every read goes through an EXISTING
+ * WhoopDao query, so this fork adds no NOOP query/table/DAO surface.
  */
 private class WhoopObservationSource(private val app: NoopApplication) : ObservationSource {
 
@@ -152,4 +156,102 @@ private class WhoopObservationSource(private val app: NoopApplication) : Observa
         val deviceId = app.activeDeviceId
         if (deviceId.isEmpty()) null else WhoopDatabase.get(app).whoopDao().latestHrSampleTs(deviceId)
     }.getOrDefault(null)
+
+    /**
+     * The device's local yyyy-MM-dd for today — the SAME local-day keying NOOP's #277 dailyMetric
+     * re-bucketing uses (day = dayString(ts, tzOffsetSec) with the default TimeZone; LocalDate.now()
+     * reads the same default zone). Today's row keeps mutating until the day is over, so the sync
+     * layer holds it back and ships it only once the day is complete.
+     */
+    override suspend fun todayDay(): String? = runCatching { java.time.LocalDate.now().toString() }
+        .getOrDefault(null)
+
+    override suspend fun dailyMetrics(fromDayInclusive: String, limit: Int): List<DailyMetricObservation> =
+        runCatching {
+            val deviceId = app.activeDeviceId
+            if (deviceId.isEmpty()) {
+                emptyList()
+            } else {
+                val today = todayDay() ?: return emptyList()
+                WhoopDatabase.get(app).whoopDao()
+                    .dailyMetricsRange(deviceId, from = fromDayInclusive, to = today)
+                    .filter { it.day >= fromDayInclusive && it.day < today }
+                    .take(limit)
+                    .map { it.toObservation() }
+            }
+        }.getOrDefault(emptyList())
+
+    override suspend fun sleepSessions(fromStartTsInclusive: Long, limit: Int): List<SleepSessionObservation> =
+        runCatching {
+            val deviceId = app.activeDeviceId
+            if (deviceId.isEmpty()) {
+                emptyList()
+            } else {
+                // Only FINISHED sessions ship (endTs in the past): an open night is still being
+                // staged and its stagesJSON would arrive half-derived. The DAO limit is padded so
+                // filtering the open session never starves a full window (see SYNC-NOTES §3.6).
+                val now = System.currentTimeMillis() / 1000
+                WhoopDatabase.get(app).whoopDao()
+                    .sleepSessions(deviceId, from = fromStartTsInclusive, to = now, limit = limit + 8)
+                    .filter { it.startTs >= fromStartTsInclusive && it.endTs <= now }
+                    .take(limit)
+                    .map {
+                        SleepSessionObservation(
+                            sourceRecordId = "sleep:$deviceId:${it.startTs}",
+                            startTsEpochSeconds = it.startTs,
+                            endTsEpochSeconds = it.endTs,
+                            efficiency = it.efficiency,
+                            restingHr = it.restingHr,
+                            avgHrv = it.avgHrv,
+                            userEdited = it.userEdited,
+                            stagesJSON = it.stagesJSON,
+                        )
+                    }
+            }
+        }.getOrDefault(emptyList())
+
+    override suspend fun rrIntervals(fromTsInclusive: Long, limit: Int): List<RrIntervalObservation> =
+        runCatching {
+            val deviceId = app.activeDeviceId
+            if (deviceId.isEmpty()) {
+                emptyList()
+            } else {
+                // The DAO read applies NOOP's own R-R filters (excludes the redundant SPO2_IBI
+                // channel and future-stamped tsSuspect rows) — sync sees exactly what local
+                // scoring sees, never a duplicated or corrupt beat.
+                WhoopDatabase.get(app).whoopDao()
+                    .rrIntervals(deviceId, from = fromTsInclusive, to = Long.MAX_VALUE, limit = limit)
+                    .map {
+                        RrIntervalObservation(
+                            sourceRecordId = "rr:$deviceId:${it.ts}:${it.rrMs}:${it.seq}",
+                            tsEpochSeconds = it.ts,
+                            rrMs = it.rrMs,
+                            seq = it.seq,
+                        )
+                    }
+            }
+        }.getOrDefault(emptyList())
 }
+
+/** Field-for-field copy onto the sync module's mirror type — the mapping table lives in :sync. */
+private fun com.noop.data.DailyMetric.toObservation() = DailyMetricObservation(
+    day = day,
+    totalSleepMin = totalSleepMin,
+    efficiency = efficiency,
+    deepMin = deepMin,
+    remMin = remMin,
+    lightMin = lightMin,
+    disturbances = disturbances,
+    restingHr = restingHr,
+    avgHrv = avgHrv,
+    recovery = recovery,
+    strain = strain,
+    exerciseCount = exerciseCount,
+    spo2Pct = spo2Pct,
+    skinTempDevC = skinTempDevC,
+    respRateBpm = respRateBpm,
+    steps = steps,
+    activeKcalEst = activeKcalEst,
+    avgSdnn = avgSdnn,
+    skinTempC = skinTempC,
+)
