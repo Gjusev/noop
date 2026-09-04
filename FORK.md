@@ -26,38 +26,43 @@ license obligates.
 |---|---|
 | `android/sync/build.gradle.kts` | Android library module: OkHttp (app's existing stack), kotlinx-serialization-json, zstd-jni (AAR runtime / JAR test), work-runtime-ktx, security-crypto, coroutines, JUnit |
 | `android/sync/consumer-rules.pro` | ProGuard keeps for the serialization-generated serializers (host ships unminified; belt-and-braces) |
-| `src/main/java/com/noop/sync/SyncContract.kt` | Frozen wire constants: schema "2", journal v1, codec zstd, endpoints, bpm/size gates, rotation + retry policy, error-code vocabulary |
+| `src/main/java/com/noop/sync/SyncContract.kt` | Frozen wire constants: schema "2" (batches) + "1" (single families), journal v1, codec zstd, endpoints, bpm/rr_ms/size/batch-cap gates, metric + sleep-state vocabularies, rotation + retry policy, error-code vocabulary |
 | `src/main/java/com/noop/sync/SyncState.kt` | `SyncStatus`/`SyncState` + `SyncDiagnostics` (StateFlow, counters, bounded redacted event log) |
-| `src/main/java/com/noop/sync/SyncRepository.kt` | `ObservationSource` interface (app implements over its Room DAO), `HrObservation`, DTO mapping, ts-window batching, monotonic `SyncWatermark` |
+| `src/main/java/com/noop/sync/SyncRepository.kt` | `ObservationSource` interface (app implements over its Room DAO), `HrObservation` + the dailyMetric/sleepSession/rrInterval observation mirrors, `StagesJson` parser, DTO mapping, per-family window batching (`familyWindow`), 4-key monotonic `SyncWatermark` |
 | `src/main/java/com/noop/sync/SyncRuntime.kt` | Process-wide installed object graph + on-disk layout under `filesDir/somatriq/` |
 | `src/main/java/com/noop/sync/SyncManager.kt` | Facade: pair/unpair, expedited `forceSyncNow()`, 15-min periodic `schedule()`, `onForegroundEvent()`, battery/network constraints |
 | `src/main/java/com/noop/sync/dto/DtoJson.kt` | The one strict `Json` instance (`ignoreUnknownKeys = false`) |
 | `src/main/java/com/noop/sync/dto/IngestDtos.kt` | Frozen ingest DTOs (`IngestRecordDto`, `RawPayloadDto`, `IngestBatchRequestDto`, `IngestAckDto`) |
+| `src/main/java/com/noop/sync/dto/FamilyIngestDtos.kt` | Frozen single-family DTOs (daily-observations / sleep-sessions / rr-intervals, schema "1") + `FamilyJson` (null-omitting encode) |
 | `src/main/java/com/noop/sync/dto/PairingDtos.kt` | Pairing req/resp, error envelope, client-side `AuthStatusDto`/`DeviceInfoDto` |
-| `src/main/java/com/noop/sync/dto/Validators.kt` | Client mirrors of the server gates: bpm 20.0–250.0, ts must carry UTC offset, 8 MiB payload cap, schema gates |
-| `src/main/java/com/noop/sync/api/SyncApiClient.kt` | OkHttp client: ingest + pairing endpoints; error_code → Retryable/Permanent/CredentialsInvalid taxonomy |
+| `src/main/java/com/noop/sync/dto/Validators.kt` | Client mirrors of the server gates: bpm 20.0–250.0, rr_ms 200–2500 + 20k batch cap, day/efficiency/state gates, ts must carry UTC offset, 8 MiB payload cap, schema gates |
+| `src/main/java/com/noop/sync/api/SyncApiClient.kt` | OkHttp client (open for test stubs): batches + 3 family + pairing endpoints; error_code → Retryable/Permanent/CredentialsInvalid taxonomy |
 | `src/main/java/com/noop/sync/capture/RawCapturePoint.kt` | `fun interface RawCapture`, no-op default, process-wide never-throwing tap — the only sync symbol the BLE stack sees |
 | `src/main/java/com/noop/sync/capture/JournalCodec.kt` | Raw Journal v1 pure-JVM codec: `u32_be len \| u64_be epoch_ms \| frame`, zstd round-trip |
 | `src/main/java/com/noop/sync/capture/SegmentStore.kt` | Segment storage abstraction + `FileSegmentStore` (atomic tmp+rename writes, restart-safe sequence) |
 | `src/main/java/com/noop/sync/capture/RawJournalWriter.kt` | The journal: in-memory append, rotation at ~1 MiB/5 min, IO off the BLE thread, claim/build/prune/release with server-authorized pruning only |
 | `src/main/java/com/noop/sync/pairing/DeviceCredentials.kt` | Keystore-backed `EncryptedDeviceTokenStore` (token never logged) + in-memory store type |
 | `src/main/java/com/noop/sync/pairing/PairingManager.kt` | Pairing-code confirm + token persistence, typed outcomes |
-| `src/main/java/com/noop/sync/queue/SyncQueue.kt` | Durable JSON-file batch queue: batch UUID minted once at enqueue, backoff table, crash-safe state machine |
-| `src/main/java/com/noop/sync/worker/SyncEngine.kt` | The drain state machine (plain Kotlin, JVM-testable): window batching, send, ack effects, prune authorization, cancel-safety |
+| `src/main/java/com/noop/sync/queue/SyncQueue.kt` | Durable JSON-file batch queue: batch UUID minted once at enqueue, `QueueFamily` (defaulted — legacy entries decode as HR), backoff table, crash-safe state machine |
+| `src/main/java/com/noop/sync/worker/SyncEngine.kt` | The drain state machine (plain Kotlin, JVM-testable): family dispatch (daily → sleep → rr → hr), window batching, send, ack effects, park-and-skip on family permanence, prune authorization, cancel-safety |
 | `src/main/java/com/noop/sync/worker/SyncWorker.kt` | CoroutineWorker adapter (cancellation → StopSignal) |
 | `src/test/java/com/noop/sync/capture/RawJournalWriterTest.kt` | Journal round-trips byte-exact, big-endian header layout, sha256-of-compressed, rotation by size and time, claim/prune/release, restart |
 | `src/test/java/com/noop/sync/dto/DtoSerializationTest.kt` | Frozen fixtures parsed field-for-field, round-trips, snake_case emission, strict unknown/missing-key rejection |
+| `src/test/java/com/noop/sync/dto/FamilyIngestDtoTest.kt` | Family fixtures parsed field-for-field, round-trips, snake_case emission, null-omission, strict rejection |
 | `src/test/java/com/noop/sync/dto/ValidatorTest.kt` | bpm bounds, naive-ts rejection, 8 MiB cap, schema gates |
+| `src/test/java/com/noop/sync/FamilyMappingTest.kt` | NOOP column → wire metric table (18 metrics, nulls omitted), stagesJSON parsing from the repo's own pinned example (wake→awake), efficiency 0–1 passthrough, minute-dict shape |
+| `src/test/java/com/noop/sync/FamilyWindowingTest.kt` | Family window math: free-boundary shipping, 20k chunking, shared-ts cut integrity, watermark monotonicity + restart, legacy queue-file compat |
 | `src/test/java/com/noop/sync/queue/FileSyncQueueTest.kt` | Batch-id stability, due/FIFO, crash requeue, restart persistence, backoff cap, watermark monotonicity |
-| `src/test/resources/somatriq/*.json` | The frozen wire examples, verbatim, as test resources |
+| `src/test/java/com/noop/sync/worker/SyncEngineFamilyTest.kt` | Engine drain: family order, advance-on-ack-only, same-batch-id retry, park-and-skip on rejection, credentials halt, rr 20k chunking |
+| `src/test/resources/somatriq/*.json` | The frozen wire examples, verbatim, as test resources (batch + the three families) |
 
 ### App + repo (outside the module)
 
 | File | Purpose |
 |---|---|
-| `android/app/src/main/java/com/noop/somatriq/SomatriqSyncBridge.kt` | Fork wiring: builds the object graph at startup, installs the raw tap, schedules sync only when paired; read-only `WhoopObservationSource` over `WhoopDao.rawHrSamples` |
+| `android/app/src/main/java/com/noop/somatriq/SomatriqSyncBridge.kt` | Fork wiring: builds the object graph at startup, installs the raw tap, schedules sync only when paired; read-only `WhoopObservationSource` over existing `WhoopDao` queries (`rawHrSamples`, `dailyMetricsRange`, `sleepSessions`, `rrIntervals` — no NOOP query added) |
 | `.github/workflows/android-ci.yml` | Fork CI: `:sync:test` + `:app:assembleFullRelease -PstagingRelease`, APK artifact on main |
-| `docs/somatriq/SYNC-NOTES.md` | Recon evidence (seam, `synced` verdict), design decisions, deviations |
+| `docs/somatriq/SYNC-NOTES.md` | Recon evidence (seam, `synced` verdict), design decisions, deviations, family findings (efficiency scale, stagesJSON format) |
 | `FORK.md` | This file |
 
 ## Files TOUCHED by the fork (patches — keep these diffs tiny)
@@ -117,11 +122,15 @@ double-journal) — see SYNC-NOTES §1.3.
   `SyncManager.pair()` / `status` are ready for a settings screen, and `onForegroundEvent()` +
   `onAppBackground()` are not yet called from the app's lifecycle (only startup wiring exists).
   Deliberately left unwired: every additional call site is another merge-conflict surface.
-- More observation streams (R-R, SpO2, skin temp, sleep sessions) slot in as additional
-  `ObservationSource` methods; only HrSample ships now.
+- Streams still unsynced (SpO2 samples, skin-temp samples, respiration, workouts, events) slot in
+  as further `ObservationSource` methods + family endpoints; shipping now: hrSample (batches),
+  dailyMetric, sleepSession, rrInterval.
 - A device-token expiry check (`expires_at`) is stored but not enforced client-side (the frozen
   contract shows `expires_at: null`; revocation is server-side and surfaces as
   CredentialsInvalid).
+- A re-scored OLD sleep session (startTs at/below the watermark) never re-ships — the family
+  watermark advances past it. Accepted: session edits are rare and the server holds the first
+  version; a future "edited sessions" push would need its own cursor (cf. `userEdited = 1` rows).
 
 ## Pointers
 

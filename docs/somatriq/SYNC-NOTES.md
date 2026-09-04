@@ -167,3 +167,117 @@ contract; the test fixtures under `android/sync/src/test/resources/somatriq/` pi
 - `WhoopObservationSource.maxHrTs()` reports NOOP's `latestHrSampleTs`, which coalesces
   `hrSample` with PPG-derived `ppgHrSample` (WhoopDao.kt:951-972). Informational only — the
   engine batches from real rows (`nextWindowEnd`), never from this value.
+
+---
+
+## 3. Family expansion: dailyMetric / sleepSession / rrInterval
+
+Three more NOOP tables ship through three single-family endpoints (schema_version "1", same
+`IngestAckDto` envelope, `raw_ack` always false — none carries raw frames):
+`POST /api/v1/ingest/daily-observations`, `…/sleep-sessions`, `…/rr-intervals`.
+
+### 3.1 Family watermarks (advance ONLY on an accepted ack, never backwards)
+
+| Family | Watermark key | Why |
+|---|---|---|
+| dailyMetric | max acked `day` (string compare) | NOOP's `day` is a fixed-width LOCAL "yyyy-MM-dd" (AnalyticsEngine.kt:117-131, `dayString(ts, offsetSec)`), so lexicographic == chronological |
+| sleepSession | max acked `startTs` (unix s) | PK (deviceId, startTs) — unique per row |
+| rrInterval | max acked `ts` (unix s) | NOT unique per row — PK is (deviceId, ts, rrMs, seq) |
+
+All four watermarks (hr + the three families) live in the one `watermark.json`; new fields have
+defaults, so a pre-family file decodes unchanged.
+
+**Today-gating (daily):** a `dailyMetric` row for the CURRENT local day keeps mutating until the
+day is over (recovery/strain update through the day), so the source holds back rows with
+`day >= today` (`ObservationSource.todayDay()`, implemented with `LocalDate.now()` — the same
+default-timezone local day NOOP's #277 re-bucketing keys on). Today ships tomorrow.
+
+**Finished-sessions-only (sleep):** the source filters to `endTs <= now` — an open night is still
+being staged and would arrive half-derived. `startTsAdjusted` is deliberately NOT the sync key:
+`startTs` is the immutable PK; the adjusted onset is a display/edit concern.
+
+**RR windowing (`SyncRepository.familyWindow`)** is shared by all three families: read cap+1 rows
+from the watermark INCLUSIVE; rows AT the watermark key (already acked) ship free without
+consuming cap slots — otherwise a fully-booked boundary second would re-mint the same window
+forever; a full window is cut at the last key the NEXT row does not share, so no ts is ever split
+across batches; boundary rows re-send on the next window and the server dedupes them by
+`source_record_id`. At the real 20k cap with ~1–2 beats/s this is exact; the degenerate
+budget≤0 branch (>20k rows sharing ONE second — a 20 kHz heartbeat) steps past the key rather
+than wedging the family, documented in the code.
+
+**Drain order** per pass: daily → sleep → rr → hr+raw (small high-value data never queues behind
+an R-R backlog). Each family enqueues at most one batch per loop iteration; `MAX_BATCHES_PER_PASS`
+bounds the pass.
+
+### 3.2 Efficiency scale: NOOP already stores 0..1 — wire passes through UNCHANGED
+
+- Strap path: `DetectedSleep.efficiency` is documented "asleep / in-bed in [0, 1] (AASM TST/TIB)"
+  (`android/app/src/main/java/com/noop/analytics/AnalyticsModels.kt:77`), persisted verbatim into
+  `SleepSession.efficiency` at `IntelligenceEngine.kt:1620` (`efficiency = s.efficiency`).
+- Import path: Oura mapping computes `asleepSec / inBedSec` —
+  `android/app/src/main/java/com/noop/oura/OuraSleepSessionMapping.kt:76` — and the repo's own
+  test pins 4 asleep epochs of 5 → `0.8` (`OuraSleepSessionMappingTest.efficiencyIsAsleepOverInBed`).
+- The re-derive fallback in `AnalyticsEngine.sleepSessionFromProvided` (AnalyticsEngine.kt:218-219)
+  is also `asleep / inBed`.
+
+No normalization is applied anywhere in the sync layer; the validator enforces [0.0, 1.0].
+
+### 3.3 stagesJSON format (as written by NOOP, parsed by `com.noop.sync.StagesJson`)
+
+On-device shape (writer: `AnalyticsEngine.encodeStages`, AnalyticsEngine.kt:152-177; mirrors
+Swift `.sortedKeys` — keys alphabetical `end`, `stage`, `start`):
+
+```json
+[{"end":1700000060,"stage":"deep","start":1700000000},{"start":1700000060,"end":1700000090,"stage":"light"},…]
+```
+
+- `start`/`end`: wall-clock unix SECONDS; `stage`: the STRING vocabulary `"wake"|"light"|"deep"|"rem"`
+  (`AnalyticsModels.StageSegment`, AnalyticsModels.kt:63-70 — strings, never int codes).
+- The repo's own test pins the byte shape verbatim:
+  `android/app/src/test/java/com/noop/oura/OuraSleepSessionMappingTest.kt:49-56`, including
+  "awake persists as `\"wake\"`" (line 62). The wire vocabulary is `awake|light|deep|rem`, so the
+  mapper renames `wake → awake` (one direction only; an unknown state drops the span).
+- There is a SECOND, imported shape — the minute-dict `{"light":…,"deep":…,"rem":…,"awake":…}`
+  (`SleepStageTotals.kt` decodes both). It is not a timeline: it yields NO wire stages (the
+  session still ships with `"stages":[]` and its scalar fields).
+- 30 s epoch grid; one session's stages plus its `motionJSON`/`sleepStateJSON` share that grid
+  (only stagesJSON ships — the other two are local analytics).
+
+### 3.4 R-R specifics found in NOOP code
+
+- `RrInterval.ts` is unix SECONDS (not ms): rows come from the same `toWall(...)` wall-clock
+  reference as HrSample (`protocol/Streams.kt:305-326` → `extractStreams`; the sync module formats
+  with `Instant.ofEpochSecond` exactly like HR).
+- `seq` is assigned per `(ts, rrMs)` WITHIN one insert batch (`WhoopRepository.assignRrSeq`,
+  WhoopRepository.kt:234-252) — it repeats across batches and across different rrMs at the same
+  ts. So `source_record_id` carries the FULL Room PK: `rr:<deviceId>:<ts>:<rrMs>:<seq>`.
+- The read goes through the EXISTING `WhoopDao.rrIntervals` (WhoopDao.kt:451-453), which applies
+  NOOP's own filters: excludes the redundant SPO2_IBI channel (#1071) and future-stamped
+  `tsSuspect` rows (#1073). Sync sees exactly what local HRV scoring sees.
+- Sleep sessions read via the existing `WhoopDao.sleepSessions` (WhoopDao.kt:665-668); daily
+  metrics via the existing `WhoopDao.dailyMetricsRange` (WhoopDao.kt:582-585). NO NOOP DAO/table/
+  query was added or modified for the families — the sync reads are read-only over existing
+  queries, implemented in the fork's own `SomatriqSyncBridge` adapter.
+
+### 3.5 Family failure semantics (deliberate deviation from the HR batch)
+
+The original HR+raw batch HALTS the drain on a permanent condition (its failure is process-wide:
+local bug, contract drift). A single-family batch that fails permanently (server `Permanent`,
+`accepted=false`, or local validation) is PARKED as `FAILED_PERMANENT` and its window is SKIPPED
+(the family watermark advances past it), and the drain CONTINUES with the other families. The
+skip is required for liveness: without it the next pass would re-mint the same window as a fresh
+entry and mint-fail forever. Cost: that window's rows are not synced (loudly logged); one
+family's bad data never stops the others' acks. `CredentialsInvalid` still halts everything.
+
+### 3.6 Small print
+
+- Daily rows whose metric columns are ALL null map to zero items; if every row in a window is
+  null-only the window is consumed with no request (never re-minted, never an empty-item batch).
+- The frozen family metric vocabulary (18) maps 1:1 to NOOP's DailyMetric columns; `spo2Red`,
+  `spo2Ir` and `sleepHrOnly` have NO wire counterpart and are not sent.
+- Family DTOs encode through `FamilyJson` (`explicitNulls = false`, derived from the frozen strict
+  instance) so a null `efficiency`/`resting_hr`/`avg_hrv` is OMITTED, per the no-nulls contract;
+  `DtoJson.json` itself is untouched — its null-emission behavior belongs to the /ingest/batches
+  contract.
+- `enqueueFamily` queue entries carry the family + window bounds; pre-family queue files decode
+  as HR entries via the defaulted `family` field (pinned by test).
