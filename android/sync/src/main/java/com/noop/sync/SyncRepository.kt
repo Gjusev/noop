@@ -359,12 +359,14 @@ class SyncRepository(private val source: ObservationSource) {
      *    does not share, so no key is ever split by a window boundary; rows sharing the cut key
      *    beyond the budget ship next window (as free boundary rows).
      * 4. If the budget would split a whole key group (every budget+1 row of `rest` shares one
-     *    key — needs >cap rows on adjacent keys), ship the group capped and END ON the key: the
-     *    dropped stragglers re-read as boundary next window. No loss, always progress.
-     * 5. [stepPastKey] exists only for the pathological boundary-fills-the-cap case (>maxRows
-     *    rows sharing the watermark key itself — >20k beats in ONE second for R-R, unreachable
-     *    for unique-key families): ship the cap and step PAST the key, because ending on it would
-     *    re-mint forever. Stragglers at that key are skipped, loudly bounded by physics.
+     *    key — needs ~cap rows on adjacent keys), ship the group capped and END ON the key: the
+     *    dropped stragglers re-read as boundary next window and ship free there.
+     * 5. [stepPastKey] exists only for the pathological boundary-fills-the-cap case (boundary
+     *    rows ≥ maxRows — >20k beats sharing the watermark SECOND for R-R, unreachable for
+     *    unique-key families): ship the cap and step PAST the key, because ending on it would
+     *    re-mint forever. Rules 4–5 are exact for any real key multiplicity (~1–2 rows/key vs a
+     *    20k cap); at absurd multiplicities a straddling straggler can be skipped rather than
+     *    wedge the family — bounded by physics, documented in SYNC-NOTES §3.1.
      */
     private fun <T, K : Comparable<K>> familyWindow(
         read: List<T>,
