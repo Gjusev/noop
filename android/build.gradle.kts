@@ -6,4 +6,6 @@ plugins {
     id("org.jetbrains.kotlin.android") version "1.9.24" apply false
     // KSP version is <kotlinVersion>-<kspVersion>; must track the Kotlin version exactly.
     id("com.google.devtools.ksp") version "1.9.24-1.0.20" apply false
+    // Somatriq sync module (fork addition): frozen snake_case wire-contract DTOs.
+    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.24" apply false
 }

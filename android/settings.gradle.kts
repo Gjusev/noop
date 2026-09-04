@@ -22,3 +22,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "NOOP"
 include(":app")
+// Somatriq sync module (fork addition): local-first raw-frame journal + server sync.
+include(":sync")

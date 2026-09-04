@@ -1,0 +1,8 @@
+{
+  "device_id": "5f0c9b8a-1234-4cde-9abc-def012345678",
+  "token": "sqt_dev_example_token_not_a_real_secret",
+  "token_type": "device",
+  "scopes": ["ingest.write", "device.read", "sync.read"],
+  "issued_at": "2026-09-04T06:30:00Z",
+  "expires_at": null
+}

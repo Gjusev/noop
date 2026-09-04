@@ -1,0 +1,5 @@
+{
+  "error_code": "VALIDATION",
+  "message": "records[3].bpm must be between 20.0 and 250.0",
+  "details": []
+}

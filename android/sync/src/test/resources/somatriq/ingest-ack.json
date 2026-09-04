@@ -1,0 +1,12 @@
+{
+  "batch_id": "3f9d2c1e-8b47-4a92-9c1d-5e6f7a8b9c0d",
+  "accepted": true,
+  "records_received": 612,
+  "records_inserted": 612,
+  "records_duplicate": 0,
+  "raw_ack": true,
+  "raw_frame_count": 612,
+  "raw_bytes_stored": 4211,
+  "warnings": [],
+  "server_time": "2026-09-04T06:41:05Z"
+}

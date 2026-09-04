@@ -248,6 +248,9 @@ dependencyLocking {
 }
 
 dependencies {
+    // --- Somatriq sync (fork addition): local-first raw journal + server exporter ---
+    implementation(project(":sync"))
+
     // --- Compose (BOM pins all Compose artifact versions in lockstep) ---
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
     implementation(composeBom)
