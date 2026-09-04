@@ -1,0 +1,10 @@
+{
+  "batch_id": "a1b2c3d4-1111-4111-8111-abcdefabcdef",
+  "schema_version": "1",
+  "decoder_version": "noop-android/11.1.1+somatriq",
+  "items": [
+    {"day": "2026-09-03", "metric": "total_sleep_min", "value": 452.0},
+    {"day": "2026-09-03", "metric": "efficiency", "value": 0.88},
+    {"day": "2026-09-03", "metric": "recovery", "value": 78.0}
+  ]
+}

@@ -85,6 +85,108 @@ object Validators {
         return Validation.Valid
     }
 
+    // --- Single-family endpoints (schema "1") -----------------------------------------------------------
+
+    /**
+     * `day` must be a real ISO calendar date "yyyy-MM-dd" (exactly what NOOP's DailyMetric.day
+     * stores). String compare on this shape is order-correct, which is what the daily watermark
+     * relies on.
+     */
+    fun validateDay(day: String): Validation = when {
+        !ISO_DAY_REGEX.matches(day) -> Validation.invalid("day '$day' is not an ISO yyyy-MM-dd date")
+        else -> try {
+            java.time.LocalDate.parse(day)
+            Validation.Valid
+        } catch (_: DateTimeParseException) {
+            Validation.invalid("day '$day' is not a real calendar date")
+        }
+    }
+
+    /** efficiency is 0..1 on the wire (and in NOOP — verified, SYNC-NOTES §3.2). */
+    fun validateEfficiency(efficiency: Double): Validation = when {
+        efficiency.isNaN() || efficiency.isInfinite() ->
+            Validation.invalid("efficiency not a finite number: $efficiency")
+        efficiency < 0.0 || efficiency > 1.0 ->
+            Validation.invalid("efficiency $efficiency outside [0.0, 1.0]")
+        else -> Validation.Valid
+    }
+
+    fun validateDailyObservations(request: DailyObservationsRequestDto): Validation {
+        familyEnvelope(request.batchId, request.schemaVersion, request.decoderVersion)?.let { return it }
+        if (request.items.isEmpty()) return Validation.invalid("items empty")
+        request.items.forEachIndexed { i, item ->
+            validateDay(item.day).let { if (it is Validation.Invalid) return Validation.invalid("items[$i]: ${it.reason}") }
+            if (item.metric !in SyncContract.DAILY_METRICS) {
+                return Validation.invalid("items[$i]: metric '${item.metric}' not in the frozen vocabulary")
+            }
+            if (item.value.isNaN() || item.value.isInfinite()) {
+                return Validation.invalid("items[$i]: value not a finite number: ${item.value}")
+            }
+        }
+        return Validation.Valid
+    }
+
+    fun validateSleepSessions(request: SleepSessionsRequestDto): Validation {
+        familyEnvelope(request.batchId, request.schemaVersion, request.decoderVersion)?.let { return it }
+        if (request.sessions.isEmpty()) return Validation.invalid("sessions empty")
+        request.sessions.forEachIndexed { i, s ->
+            if (s.sourceRecordId.isBlank()) return Validation.invalid("sessions[$i]: source_record_id blank")
+            validateTs(s.startTs).let { if (it is Validation.Invalid) return Validation.invalid("sessions[$i].start_ts: ${it.reason}") }
+            validateTs(s.endTs).let { if (it is Validation.Invalid) return Validation.invalid("sessions[$i].end_ts: ${it.reason}") }
+            s.efficiency?.let {
+                validateEfficiency(it).let { v -> if (v is Validation.Invalid) return Validation.invalid("sessions[$i]: ${v.reason}") }
+            }
+            s.restingHr?.let {
+                if (it < SyncContract.BPM_MIN.toInt() || it > SyncContract.BPM_MAX.toInt()) {
+                    return Validation.invalid("sessions[$i].resting_hr $it outside [${SyncContract.BPM_MIN.toInt()}, ${SyncContract.BPM_MAX.toInt()}]")
+                }
+            }
+            s.avgHrv?.let {
+                if (it.isNaN() || it.isInfinite() || it < 0.0) {
+                    return Validation.invalid("sessions[$i].avg_hrv not a finite non-negative number: $it")
+                }
+            }
+            s.stages.forEachIndexed { j, st ->
+                if (st.state !in SyncContract.SLEEP_STATES) {
+                    return Validation.invalid("sessions[$i].stages[$j]: state '${st.state}' not in ${SyncContract.SLEEP_STATES}")
+                }
+                validateTs(st.startTs).let { if (it is Validation.Invalid) return Validation.invalid("sessions[$i].stages[$j].start_ts: ${it.reason}") }
+                validateTs(st.endTs).let { if (it is Validation.Invalid) return Validation.invalid("sessions[$i].stages[$j].end_ts: ${it.reason}") }
+            }
+        }
+        return Validation.Valid
+    }
+
+    fun validateRrIntervals(request: RrIntervalsRequestDto): Validation {
+        familyEnvelope(request.batchId, request.schemaVersion, request.decoderVersion)?.let { return it }
+        if (request.records.isEmpty()) return Validation.invalid("records empty")
+        if (request.records.size > SyncContract.RR_MAX_RECORDS_PER_BATCH) {
+            return Validation.invalid(
+                "records ${request.records.size} exceed the ${SyncContract.RR_MAX_RECORDS_PER_BATCH}-record batch cap",
+            )
+        }
+        request.records.forEachIndexed { i, r ->
+            if (r.sourceRecordId.isBlank()) return Validation.invalid("records[$i]: source_record_id blank")
+            validateTs(r.ts).let { if (it is Validation.Invalid) return Validation.invalid("records[$i]: ${it.reason}") }
+            if (r.rrMs < SyncContract.RR_MS_MIN || r.rrMs > SyncContract.RR_MS_MAX) {
+                return Validation.invalid(
+                    "records[$i]: rr_ms ${r.rrMs} outside [${SyncContract.RR_MS_MIN}, ${SyncContract.RR_MS_MAX}]",
+                )
+            }
+            if (r.seq < 0) return Validation.invalid("records[$i]: seq ${r.seq} negative")
+        }
+        return Validation.Valid
+    }
+
+    /** Shared envelope gate for the schema-"1" family endpoints. Null = envelope OK. */
+    private fun familyEnvelope(batchId: String, schemaVersion: String, decoderVersion: String): Validation? = when {
+        batchId.isBlank() -> Validation.invalid("batch_id blank")
+        schemaVersion != SyncContract.FAMILY_SCHEMA_VERSION ->
+            Validation.invalid("schema_version $schemaVersion != ${SyncContract.FAMILY_SCHEMA_VERSION}")
+        decoderVersion.isBlank() -> Validation.invalid("decoder_version blank")
+        else -> null
+    }
+
     private fun hasExplicitOffset(ts: String): Boolean {
         // "Z" suffix, or ±hh:mm / ±hhmm after a 'T'. Everything else is naive or malformed.
         if (ts.endsWith("Z") || ts.endsWith("z")) return true
@@ -93,4 +195,6 @@ object Validators {
         val tail = ts.substring(t + 1)
         return tail.substringAfterLast('+', "").length >= 2 || tail.substringAfterLast('-', "").length >= 2
     }
+
+    private val ISO_DAY_REGEX = Regex("""^\d{4}-\d{2}-\d{2}$""")
 }

@@ -1,12 +1,16 @@
 package com.noop.sync.api
 
 import com.noop.sync.SyncContract
+import com.noop.sync.dto.DailyObservationsRequestDto
 import com.noop.sync.dto.DtoJson
 import com.noop.sync.dto.ErrorDto
+import com.noop.sync.dto.FamilyJson
 import com.noop.sync.dto.IngestAckDto
 import com.noop.sync.dto.IngestBatchRequestDto
 import com.noop.sync.dto.PairingConfirmRequestDto
 import com.noop.sync.dto.PairingConfirmResponseDto
+import com.noop.sync.dto.RrIntervalsRequestDto
+import com.noop.sync.dto.SleepSessionsRequestDto
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -49,7 +53,7 @@ sealed class SyncCallResult<out T> {
     }
 }
 
-class SyncApiClient(
+open class SyncApiClient(
     val config: SyncConfig,
     private val client: OkHttpClient = defaultClient(config),
 ) {
@@ -57,12 +61,47 @@ class SyncApiClient(
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     /** POST {server}/api/v1/ingest/batches with the device token. */
-    fun ingestBatch(deviceToken: String, request: IngestBatchRequestDto): SyncCallResult<IngestAckDto> =
+    open fun ingestBatch(deviceToken: String, request: IngestBatchRequestDto): SyncCallResult<IngestAckDto> =
         execute(
             path = SyncContract.PATH_INGEST_BATCHES,
             body = DtoJson.json.encodeToString(
                 IngestBatchRequestDto.serializer(), request,
             ),
+            token = deviceToken,
+        ) { DtoJson.json.decodeFromString(IngestAckDto.serializer(), it) }
+
+    // --- Single-family endpoints (schema "1"; same error taxonomy, same ack envelope) ---
+
+    /** POST {server}/api/v1/ingest/daily-observations with the device token. */
+    open fun postDailyObservations(
+        deviceToken: String,
+        request: DailyObservationsRequestDto,
+    ): SyncCallResult<IngestAckDto> =
+        execute(
+            path = SyncContract.PATH_INGEST_DAILY_OBSERVATIONS,
+            body = FamilyJson.json.encodeToString(DailyObservationsRequestDto.serializer(), request),
+            token = deviceToken,
+        ) { DtoJson.json.decodeFromString(IngestAckDto.serializer(), it) }
+
+    /** POST {server}/api/v1/ingest/sleep-sessions with the device token. */
+    open fun postSleepSessions(
+        deviceToken: String,
+        request: SleepSessionsRequestDto,
+    ): SyncCallResult<IngestAckDto> =
+        execute(
+            path = SyncContract.PATH_INGEST_SLEEP_SESSIONS,
+            body = FamilyJson.json.encodeToString(SleepSessionsRequestDto.serializer(), request),
+            token = deviceToken,
+        ) { DtoJson.json.decodeFromString(IngestAckDto.serializer(), it) }
+
+    /** POST {server}/api/v1/ingest/rr-intervals with the device token. */
+    open fun postRrIntervals(
+        deviceToken: String,
+        request: RrIntervalsRequestDto,
+    ): SyncCallResult<IngestAckDto> =
+        execute(
+            path = SyncContract.PATH_INGEST_RR_INTERVALS,
+            body = FamilyJson.json.encodeToString(RrIntervalsRequestDto.serializer(), request),
             token = deviceToken,
         ) { DtoJson.json.decodeFromString(IngestAckDto.serializer(), it) }
 
